@@ -2,7 +2,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from matplotlib.transforms import Affine2D
 
 import rclpy
 from rclpy.serialization import deserialize_message
@@ -10,8 +9,6 @@ from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
 
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image
-
-from matplotlib.collections import LineCollection
 
 
 BAG_PATH = "/home/nan/datasets/0225_data/episode_0/episode_0.mcap"
@@ -31,11 +28,13 @@ K3 = 0.01021067
 K4 = -0.00235273
 
 HORIZON = 10
-DRAW_PAST = False   # False -> 不画历史（蓝线）
+DRAW_PAST = False         # False -> 不画历史（蓝点）
+POINT_SIZE = 80          # 点大小：建议 60~200（你说看不到就把这个加大）
+POINT_EDGE = 0.0         # 点边框线宽：0 或 0.5 都行
 
 # --- Camera extrinsics in wrist frame ---
 T_W_C = np.array([-0.03704, -0.05092, 0.02236], dtype=np.float64)  # meters
-EULER_XYZ_DEG = np.array([-171.825 + 180, -11.079, 12.307], dtype=np.float64)  # (x,y,z) about X,Y,Z in degrees
+EULER_XYZ_DEG = np.array([-171.825 + 180, -11.079, 12.307], dtype=np.float64)  # (z,x,y) custom
 
 # --- A point 0.1m in front of camera optical center along camera +Z ---
 CAM_FORWARD_OFFSET_M = 0.1
@@ -78,12 +77,7 @@ def rot_z(a):
 
 def euler_zxy_custom_deg_to_rot(z_deg, x_deg, y_deg):
     """
-    Intrinsic Z -> X -> Y:
-      rotate about current Z by z_deg,
-      then current X by x_deg,
-      then current Y by y_deg.
-
-    Column-vector convention:
+    Intrinsic Z -> X -> Y (column-vector convention):
       R = Ry(y) @ Rx(x) @ Rz(z)
     """
     z = np.deg2rad(z_deg)
@@ -139,8 +133,8 @@ def read_two_topics_from_bag():
 
 def project_points_equidistant_full(P_cam, fx, fy, cx, cy, k1, k2, k3, k4):
     """
-    Project 3D points to pixels using an equidistant fisheye model.
-    Returns uv with shape (N,2); invalid points become NaN (not dropped).
+    Project 3D points to pixels using equidistant fisheye model.
+    Returns uv (N,2); invalid points -> NaN.
     """
     uv = np.full((P_cam.shape[0], 2), np.nan, dtype=np.float64)
 
@@ -159,7 +153,6 @@ def project_points_equidistant_full(P_cam, fx, fy, cx, cy, k1, k2, k3, k4):
     theta4 = theta2 * theta2
     theta6 = theta4 * theta2
     theta8 = theta4 * theta4
-
     theta_d = theta * (1.0 + k1*theta2 + k2*theta4 + k3*theta6 + k4*theta8)
 
     scale = np.ones_like(r)
@@ -208,8 +201,7 @@ def main():
 
     # --- Relative to first wrist frame ---
     t0 = t_w[0]
-    R0 = R_w[0]
-    R0T = R0.T
+    R0T = R_w[0].T
 
     t_w_rel  = (R0T @ (t_w  - t0).T).T
     t_c_rel  = (R0T @ (t_c  - t0).T).T
@@ -235,30 +227,24 @@ def main():
     ax3d.legend(loc="upper left")
 
     # --- Image view ---
-    axim.set_title("2D: projected trajectory (polyline)")
+    axim.set_title("2D: projected points (no lines)")
     axim.axis("off")
 
-    img_received0 = image_msg_to_numpy(imgs[0])   # already rotated
-    img_orig0 = rotate_image_180(img_received0)   # unrotate for projection coords
-    im_artist = axim.imshow(img_orig0)
+    # IMPORTANT: show RECEIVED image (already rotated)
+    img_received0 = image_msg_to_numpy(imgs[0])
+    im_artist = axim.imshow(img_received0)
 
-    # 2D trajectories (polylines)
-    future_line, = axim.plot([], [], color="red", linewidth=2)
-    past_line = None
+    # 2D points on RECEIVED image coordinates
+    future_sc = axim.scatter([], [], s=POINT_SIZE, c="red", linewidths=POINT_EDGE)
+    past_sc = None
     if DRAW_PAST:
-        past_line, = axim.plot([], [], color="blue", linewidth=2)
+        past_sc = axim.scatter([], [], s=POINT_SIZE, c="blue", linewidths=POINT_EDGE)
 
-    # principal point cross
-    cam_cross = axim.scatter([CX], [CY], s=120, marker="x", linewidths=2)
-
-    # Display-only 180° rotation for final composite
-    h0, w0 = img_orig0.shape[:2]
-    disp_rot = Affine2D().rotate_deg_around(w0 / 2.0, h0 / 2.0, 180)
-    im_artist.set_transform(disp_rot + axim.transData)
-    future_line.set_transform(disp_rot + axim.transData)
-    if past_line is not None:
-        past_line.set_transform(disp_rot + axim.transData)
-    cam_cross.set_transform(disp_rot + axim.transData)
+    # principal point in DISPLAY coords (because we display received image)
+    h0, w0 = img_received0.shape[:2]
+    cx_disp0 = (w0 - 1) - CX
+    cy_disp0 = (h0 - 1) - CY
+    cam_cross = axim.scatter([cx_disp0], [cy_disp0], s=200, marker="x", linewidths=2)
 
     # --- 3D bounds ---
     all_pts = np.vstack([t_w_rel, t_c_rel, t_cf_rel])
@@ -282,7 +268,6 @@ def main():
         ax3d.quiver(0, 0, 0, 0, 0, axis_len, color="blue", linewidth=2)
 
     draw_origin_axes()
-
     current_axes = []
 
     def draw_current_axes(pos, R):
@@ -298,82 +283,85 @@ def main():
     current_frame = {"i": 0}
 
     def update(i):
-        nonlocal current_axes, disp_rot
+        nonlocal current_axes
         current_frame["i"] = i
 
-        # Draw current camera axes at camera CENTER
+        # current camera axes at camera center
         for q in current_axes:
             q.remove()
         current_axes = draw_current_axes(t_c_rel[i], R_c_rel[i])
 
-        # Image update: received rotated -> unrotate
+        # show received image (already rotated)
         img_received = image_msg_to_numpy(imgs[i])
+        im_artist.set_data(img_received)
+        h, w = img_received.shape[:2]
+
+        # update principal point cross in display coords
+        cx_disp = (w - 1) - CX
+        cy_disp = (h - 1) - CY
+        cam_cross.set_offsets(np.array([[cx_disp, cy_disp]], dtype=np.float64))
+
+        j1 = min(n, i + 1 + HORIZON)
+        j0 = max(0, i - HORIZON)
+
+        # We compute projection in ORIGINAL (unrotated) coords, so we need img_orig size.
+        # We can get it by unrotating received image.
         img_orig = rotate_image_180(img_received)
-        im_artist.set_data(img_orig)
+        h0, w0 = img_orig.shape[:2]
 
-        h, w = img_orig.shape[:2]
-        disp_rot = Affine2D().rotate_deg_around(w / 2.0, h / 2.0, 180)
-        im_artist.set_transform(disp_rot + axim.transData)
-        future_line.set_transform(disp_rot + axim.transData)
-        if past_line is not None:
-            past_line.set_transform(disp_rot + axim.transData)
-        cam_cross.set_transform(disp_rot + axim.transData)
-
-        cam_cross.set_offsets(np.array([[CX, CY]], dtype=np.float64))
-
-        # Horizon indices
-        j1 = min(n, i + 1 + HORIZON)   # exclusive
-        j0 = max(0, i - HORIZON)       # inclusive
-
-        # 2D uses forward-point trajectory (t_cf_rel),
-        # expressed in CURRENT CAMERA-CENTER frame:
-        #   P_cam = R_c_rel[i]^T * ( t_cf_rel[k] - t_c_rel[i] )
-
-        # FUTURE polyline
+        # FUTURE points: forward-point trajectory expressed in current camera-center frame
         if i < j1:
             idx_f = np.arange(i, j1, dtype=np.int64)
             dt = t_cf_rel[idx_f] - t_c_rel[i]
             P_cam = (R_c_rel[i].T @ dt.T).T
             uv = project_points_equidistant_full(P_cam, FX, FY, CX, CY, K1, K2, K3, K4)
 
-            inb = (uv[:, 0] >= 0) & (uv[:, 0] < w) & (uv[:, 1] >= 0) & (uv[:, 1] < h)
-            uv = uv[inb]
+            # in-bounds in ORIGINAL image coords
+            inb0 = (uv[:, 0] >= 0) & (uv[:, 0] < w0) & (uv[:, 1] >= 0) & (uv[:, 1] < h0)
+            uv0 = uv[inb0]
 
-            if uv.shape[0] > 1:
-                future_line.set_data(uv[:, 0], uv[:, 1])
+            # convert ORIGINAL coords -> DISPLAY(received rotated) coords by 180 flip
+            if uv0.shape[0] > 0:
+                uv_disp = np.empty_like(uv0)
+                uv_disp[:, 0] = (w - 1) - uv0[:, 0]
+                uv_disp[:, 1] = (h - 1) - uv0[:, 1]
+                future_sc.set_offsets(uv_disp)
             else:
-                future_line.set_data([], [])
+                future_sc.set_offsets(np.empty((0, 2)))
         else:
-            future_line.set_data([], [])
+            future_sc.set_offsets(np.empty((0, 2)))
 
-        # PAST polyline (optional)
-        if past_line is not None and (j0 <= i):
+        # PAST points (optional)
+        if past_sc is not None and (j0 <= i):
             idx_p = np.arange(j0, i + 1, dtype=np.int64)
             dt = t_cf_rel[idx_p] - t_c_rel[i]
             P_cam = (R_c_rel[i].T @ dt.T).T
             uv = project_points_equidistant_full(P_cam, FX, FY, CX, CY, K1, K2, K3, K4)
 
-            inb = (uv[:, 0] >= 0) & (uv[:, 0] < w) & (uv[:, 1] >= 0) & (uv[:, 1] < h)
-            uv = uv[inb]
+            inb0 = (uv[:, 0] >= 0) & (uv[:, 0] < w0) & (uv[:, 1] >= 0) & (uv[:, 1] < h0)
+            uv0 = uv[inb0]
 
-            if uv.shape[0] > 1:
-                past_line.set_data(uv[:, 0], uv[:, 1])
+            if uv0.shape[0] > 0:
+                uv_disp = np.empty_like(uv0)
+                uv_disp[:, 0] = (w - 1) - uv0[:, 0]
+                uv_disp[:, 1] = (h - 1) - uv0[:, 1]
+                past_sc.set_offsets(uv_disp)
             else:
-                past_line.set_data([], [])
+                past_sc.set_offsets(np.empty((0, 2)))
         else:
-            if past_line is not None:
-                past_line.set_data([], [])
+            if past_sc is not None:
+                past_sc.set_offsets(np.empty((0, 2)))
 
         fig.suptitle(f"frame {i+1}/{n}")
 
         artists = [
             wrist_line, cam_center_line, cam_fwd_line,
             im_artist, cam_cross,
-            future_line,
+            future_sc,
             *current_axes
         ]
-        if past_line is not None:
-            artists.append(past_line)
+        if past_sc is not None:
+            artists.append(past_sc)
         return artists
 
     ani = FuncAnimation(fig, update, frames=n, interval=50, blit=False)
@@ -393,7 +381,6 @@ def main():
 
     plt.tight_layout()
     plt.show()
-
     rclpy.shutdown()
 
 
