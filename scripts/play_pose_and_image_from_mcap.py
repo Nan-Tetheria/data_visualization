@@ -15,34 +15,36 @@ BAG_PATH = "/home/nan/datasets/0225_data/episode_0/episode_0.mcap"
 TOPIC_POSE = "/right_hand_location"
 TOPIC_IMG  = "/vx/color/image_raw"
 
-# --- Camera intrinsics (for the ORIGINAL, un-rotated image) ---
+# Camera intrinsics (for the ORIGINAL, un-rotated image)
 FX = 243.31371125
 FY = 243.36591085
 CX = 330.20097652
 CY = 185.82838602
 
-# --- Equidistant (fisheye) distortion coefficients ---
+# Equidistant (fisheye) distortion coefficients
 K1 = 0.05295615
 K2 = -0.03939104
 K3 = 0.01021067
 K4 = -0.00235273
 
 HORIZON = 10
-DRAW_PAST = False         # False -> 不画历史（蓝点）
-POINT_SIZE = 80          # 点大小：建议 60~200（你说看不到就把这个加大）
-POINT_EDGE = 0.0         # 点边框线宽：0 或 0.5 都行
+DRAW_PAST = False         # Set False to disable past points
 
-# --- Camera extrinsics in wrist frame ---
-T_W_C = np.array([-0.03704, -0.05092, 0.02236], dtype=np.float64)  # meters
-EULER_XYZ_DEG = np.array([-171.825 + 180, -11.079, 12.307], dtype=np.float64)  # (z,x,y) custom
+POINT_SIZE = 80          # Scatter marker size (try 60~200)
+POINT_EDGE = 0.0         # Marker edge width
+ALPHA = 1.0              # Fixed opacity (no alpha fading)
 
-# --- A point 0.1m in front of camera optical center along camera +Z ---
+# Camera extrinsics in wrist frame
+T_W_C = np.array([-0.03704, -0.05092, 0.02236], dtype=np.float64)
+EULER_XYZ_DEG = np.array([-171.825 + 180, -11.079, 12.307], dtype=np.float64)
+
+# A point 0.1m in front of camera optical center along camera +Z
 CAM_FORWARD_OFFSET_M = 0.1
 P_C_FORWARD = np.array([0.0, 0.0, CAM_FORWARD_OFFSET_M], dtype=np.float64)  # in camera frame
 
 
 def quat_to_rot(qw, qx, qy, qz):
-    """Quaternion (w,x,y,z) -> 3x3 rotation."""
+    """Convert quaternion (w,x,y,z) to 3x3 rotation matrix."""
     n = np.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
     if n < 1e-12:
         return np.eye(3)
@@ -77,8 +79,8 @@ def rot_z(a):
 
 def euler_zxy_custom_deg_to_rot(z_deg, x_deg, y_deg):
     """
-    Intrinsic Z -> X -> Y (column-vector convention):
-      R = Ry(y) @ Rx(x) @ Rz(z)
+    Intrinsic rotation order: Z -> X -> Y
+    Column-vector convention: R = Ry(y) @ Rx(x) @ Rz(z)
     """
     z = np.deg2rad(z_deg)
     x = np.deg2rad(x_deg)
@@ -96,7 +98,7 @@ def image_msg_to_numpy(msg: Image):
     if enc in ("rgb8", "bgr8"):
         img = buf.reshape(h, step)[:, :w*3].reshape(h, w, 3)
         if enc == "bgr8":
-            img = img[:, :, ::-1]  # BGR -> RGB
+            img = img[:, :, ::-1]
         return img
 
     if enc == "mono8":
@@ -106,7 +108,7 @@ def image_msg_to_numpy(msg: Image):
 
 
 def rotate_image_180(img):
-    """Rotate image by 180 degrees (flip both axes)."""
+    """Rotate image by 180 degrees."""
     if img.ndim == 2:
         return img[::-1, ::-1]
     return img[::-1, ::-1, :]
@@ -132,10 +134,7 @@ def read_two_topics_from_bag():
 
 
 def project_points_equidistant_full(P_cam, fx, fy, cx, cy, k1, k2, k3, k4):
-    """
-    Project 3D points to pixels using equidistant fisheye model.
-    Returns uv (N,2); invalid points -> NaN.
-    """
+    """Project 3D camera-frame points to pixel coordinates using equidistant fisheye model."""
     uv = np.full((P_cam.shape[0], 2), np.nan, dtype=np.float64)
 
     z = P_cam[:, 2]
@@ -169,6 +168,35 @@ def project_points_equidistant_full(P_cam, fx, fy, cx, cy, k1, k2, k3, k4):
     return uv
 
 
+def colors_time_gradient(n_pts, mode):
+    """
+    Future: green -> red (near -> far)
+    Past:   blue  -> green (far  -> near)
+    No alpha fading (fixed ALPHA).
+    """
+    if n_pts <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+
+    t = np.linspace(0.0, 1.0, n_pts)  # 0..1 along list order
+    rgba = np.zeros((n_pts, 4), dtype=np.float64)
+
+    if mode == "future":
+        # list order: near(current) -> far
+        rgba[:, 0] = t          # R: 0 -> 1
+        rgba[:, 1] = 1.0 - t    # G: 1 -> 0
+        # B: 0
+    elif mode == "past":
+        # list order: far -> near(current)
+        rgba[:, 1] = t          # G: 0 -> 1
+        rgba[:, 2] = 1.0 - t    # B: 1 -> 0
+        # R: 0
+    else:
+        raise ValueError("mode must be 'future' or 'past'")
+
+    rgba[:, 3] = ALPHA
+    return rgba
+
+
 def main():
     rclpy.init()
 
@@ -176,11 +204,10 @@ def main():
     n = min(len(poses), len(imgs))
     if n == 0:
         raise RuntimeError("No messages found for pose/image topics. Check BAG_PATH and topic names.")
-
     poses = poses[:n]
     imgs = imgs[:n]
 
-    # --- Wrist poses in world ---
+    # Wrist poses in world
     t_w = np.zeros((n, 3), dtype=np.float64)
     R_w = np.zeros((n, 3, 3), dtype=np.float64)
     for i in range(n):
@@ -189,17 +216,17 @@ def main():
         t_w[i] = [p.x, p.y, p.z]
         R_w[i] = quat_to_rot(o.w, o.x, o.y, o.z)
 
-    # --- Camera extrinsics in wrist ---
+    # Camera extrinsics in wrist
     R_w_c = euler_zxy_custom_deg_to_rot(EULER_XYZ_DEG[0], EULER_XYZ_DEG[1], EULER_XYZ_DEG[2])
 
-    # --- Camera poses in world (center) ---
+    # Camera poses in world (center)
     t_c = t_w + (R_w @ T_W_C.reshape(3, 1)).reshape(n, 3)
     R_c = np.einsum("nij,jk->nik", R_w, R_w_c)
 
-    # --- Camera forward point (+0.1m) in world ---
+    # Camera forward point (+0.1m) in world
     t_cf = t_c + (R_c @ P_C_FORWARD.reshape(3, 1)).reshape(n, 3)
 
-    # --- Relative to first wrist frame ---
+    # Relative to first wrist frame
     t0 = t_w[0]
     R0T = R_w[0].T
 
@@ -208,7 +235,7 @@ def main():
     t_cf_rel = (R0T @ (t_cf - t0).T).T
     R_c_rel  = np.einsum("ij,njk->nik", R0T, R_c)
 
-    # --- Plot setup ---
+    # Plot setup
     fig = plt.figure(figsize=(12, 6))
     ax3d = fig.add_subplot(1, 2, 1, projection="3d")
     axim = fig.add_subplot(1, 2, 2)
@@ -218,35 +245,40 @@ def main():
     ax3d.set_ylabel("y")
     ax3d.set_zlabel("z")
 
-    wrist_line, = ax3d.plot(t_w_rel[:, 0], t_w_rel[:, 1], t_w_rel[:, 2],
-                            color="lightgray", lw=2, label="wrist")
-    cam_center_line, = ax3d.plot(t_c_rel[:, 0], t_c_rel[:, 1], t_c_rel[:, 2],
-                                 color="black", lw=2, label="camera center")
-    cam_fwd_line, = ax3d.plot(t_cf_rel[:, 0], t_cf_rel[:, 1], t_cf_rel[:, 2],
-                              color="purple", lw=2, label="camera +0.1m")
+    wrist_line, = ax3d.plot(
+        t_w_rel[:, 0], t_w_rel[:, 1], t_w_rel[:, 2],
+        color="lightgray", lw=2, label="wrist"
+    )
+    cam_center_line, = ax3d.plot(
+        t_c_rel[:, 0], t_c_rel[:, 1], t_c_rel[:, 2],
+        color="black", lw=2, label="camera center"
+    )
+    cam_fwd_line, = ax3d.plot(
+        t_cf_rel[:, 0], t_cf_rel[:, 1], t_cf_rel[:, 2],
+        color="purple", lw=2, label="camera +0.1m"
+    )
     ax3d.legend(loc="upper left")
 
-    # --- Image view ---
-    axim.set_title("2D: projected points (no lines)")
+    axim.set_title("2D: projected points (past: blue->green, future: green->red)")
     axim.axis("off")
 
-    # IMPORTANT: show RECEIVED image (already rotated)
+    # Show RECEIVED image (already rotated)
     img_received0 = image_msg_to_numpy(imgs[0])
     im_artist = axim.imshow(img_received0)
 
-    # 2D points on RECEIVED image coordinates
-    future_sc = axim.scatter([], [], s=POINT_SIZE, c="red", linewidths=POINT_EDGE)
+    # Scatter artists; per-point colors updated each frame
+    future_sc = axim.scatter([], [], s=POINT_SIZE, linewidths=POINT_EDGE)
     past_sc = None
     if DRAW_PAST:
-        past_sc = axim.scatter([], [], s=POINT_SIZE, c="blue", linewidths=POINT_EDGE)
+        past_sc = axim.scatter([], [], s=POINT_SIZE, linewidths=POINT_EDGE)
 
-    # principal point in DISPLAY coords (because we display received image)
+    # Principal point in DISPLAY coords (because we display received image)
     h0, w0 = img_received0.shape[:2]
     cx_disp0 = (w0 - 1) - CX
     cy_disp0 = (h0 - 1) - CY
     cam_cross = axim.scatter([cx_disp0], [cy_disp0], s=200, marker="x", linewidths=2)
 
-    # --- 3D bounds ---
+    # 3D bounds
     all_pts = np.vstack([t_w_rel, t_c_rel, t_cf_rel])
     mins = all_pts.min(axis=0)
     maxs = all_pts.max(axis=0)
@@ -286,52 +318,53 @@ def main():
         nonlocal current_axes
         current_frame["i"] = i
 
-        # current camera axes at camera center
+        # Draw current camera axes at camera center
         for q in current_axes:
             q.remove()
         current_axes = draw_current_axes(t_c_rel[i], R_c_rel[i])
 
-        # show received image (already rotated)
+        # Show received image
         img_received = image_msg_to_numpy(imgs[i])
         im_artist.set_data(img_received)
         h, w = img_received.shape[:2]
 
-        # update principal point cross in display coords
+        # Update principal point cross in display coords
         cx_disp = (w - 1) - CX
         cy_disp = (h - 1) - CY
         cam_cross.set_offsets(np.array([[cx_disp, cy_disp]], dtype=np.float64))
 
-        j1 = min(n, i + 1 + HORIZON)
-        j0 = max(0, i - HORIZON)
+        j1 = min(n, i + 1 + HORIZON)   # exclusive
+        j0 = max(0, i - HORIZON)       # inclusive
 
-        # We compute projection in ORIGINAL (unrotated) coords, so we need img_orig size.
-        # We can get it by unrotating received image.
+        # Get ORIGINAL (unrotated) image size for in-bounds filtering
         img_orig = rotate_image_180(img_received)
         h0, w0 = img_orig.shape[:2]
 
-        # FUTURE points: forward-point trajectory expressed in current camera-center frame
+        # FUTURE points (indices i..j1-1), list order: near->far
         if i < j1:
             idx_f = np.arange(i, j1, dtype=np.int64)
             dt = t_cf_rel[idx_f] - t_c_rel[i]
             P_cam = (R_c_rel[i].T @ dt.T).T
             uv = project_points_equidistant_full(P_cam, FX, FY, CX, CY, K1, K2, K3, K4)
 
-            # in-bounds in ORIGINAL image coords
             inb0 = (uv[:, 0] >= 0) & (uv[:, 0] < w0) & (uv[:, 1] >= 0) & (uv[:, 1] < h0)
             uv0 = uv[inb0]
 
-            # convert ORIGINAL coords -> DISPLAY(received rotated) coords by 180 flip
             if uv0.shape[0] > 0:
                 uv_disp = np.empty_like(uv0)
                 uv_disp[:, 0] = (w - 1) - uv0[:, 0]
                 uv_disp[:, 1] = (h - 1) - uv0[:, 1]
                 future_sc.set_offsets(uv_disp)
+
+                rgba = colors_time_gradient(uv_disp.shape[0], mode="future")
+                future_sc.set_facecolors(rgba)
+                future_sc.set_edgecolors(rgba)
             else:
                 future_sc.set_offsets(np.empty((0, 2)))
         else:
             future_sc.set_offsets(np.empty((0, 2)))
 
-        # PAST points (optional)
+        # PAST points (indices j0..i), list order: far->near
         if past_sc is not None and (j0 <= i):
             idx_p = np.arange(j0, i + 1, dtype=np.int64)
             dt = t_cf_rel[idx_p] - t_c_rel[i]
@@ -346,6 +379,10 @@ def main():
                 uv_disp[:, 0] = (w - 1) - uv0[:, 0]
                 uv_disp[:, 1] = (h - 1) - uv0[:, 1]
                 past_sc.set_offsets(uv_disp)
+
+                rgba = colors_time_gradient(uv_disp.shape[0], mode="past")
+                past_sc.set_facecolors(rgba)
+                past_sc.set_edgecolors(rgba)
             else:
                 past_sc.set_offsets(np.empty((0, 2)))
         else:
