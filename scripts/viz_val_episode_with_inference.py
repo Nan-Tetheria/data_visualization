@@ -3,6 +3,7 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from matplotlib.collections import LineCollection
 
 
 # -------------------------
@@ -132,17 +133,6 @@ def colors_pred_future_gradient(n_pts):
     return rgba
 
 
-# def colors_gt_future_gradient(n_pts):
-#     """GT future: green -> blue (near -> far). alpha=1."""
-#     if n_pts <= 0:
-#         return np.empty((0, 4), dtype=np.float64)
-#     t = np.linspace(0.0, 1.0, n_pts)
-#     rgba = np.zeros((n_pts, 4), dtype=np.float64)
-#     rgba[:, 1] = 1.0 - t   # G: 1 -> 0
-#     rgba[:, 2] = t         # B: 0 -> 1
-#     rgba[:, 3] = 1.0
-#     return rgba
-
 def colors_gt_future_gradient(n_pts):
     """GT future: black -> white (near -> far). alpha=1."""
     if n_pts <= 0:
@@ -190,6 +180,16 @@ def draw_triad(ax, p, R, axis_len=0.03, lw=2.0):
     lz, = ax.plot([p[0], p[0] + ez[0]], [p[1], p[1] + ez[1]], [p[2], p[2] + ez[2]],
                   color='b', linewidth=lw)
     return (lx, ly, lz)
+
+
+def segments_from_points(uv: np.ndarray) -> np.ndarray:
+    """
+    uv: (N,2)
+    return: (N-1,2,2) segments connecting adjacent points in current uv order.
+    """
+    if uv is None or uv.shape[0] < 2:
+        return np.empty((0, 2, 2), dtype=np.float64)
+    return np.stack([uv[:-1], uv[1:]], axis=1)
 
 
 def main():
@@ -276,7 +276,6 @@ def main():
     cam_fwd_line, = ax3d.plot(t_cf_rel[:, 0], t_cf_rel[:, 1], t_cf_rel[:, 2], lw=2, color="purple", label="camera +0.1m (obs)")
     ax3d.legend(loc="upper left")
 
-    # Current wrist triad (RGB)
     ax3d.scatter([t_w_rel[0, 0]], [t_w_rel[0, 1]], [t_w_rel[0, 2]], s=40)
     _triad0 = draw_triad(ax3d, t_w_rel[0], R_w_rel[0], axis_len=args.axis_len, lw=2.0)
 
@@ -291,7 +290,6 @@ def main():
     future_line, = ax3d.plot(t_cf_fut_rel0[:, 0], t_cf_fut_rel0[:, 1], t_cf_fut_rel0[:, 2], linewidth=2.0)
     future_start = ax3d.scatter([t_cf_fut_rel0[0, 0]], [t_cf_fut_rel0[0, 1]], [t_cf_fut_rel0[0, 2]], s=25)
 
-    # Predicted future camera pose triads (every N steps) at camera+0.1 positions
     pred_triads = []
     step = max(1, int(args.pred_pose_step))
     pred_axis_len = args.axis_len * 0.7
@@ -300,11 +298,8 @@ def main():
         pred_triads.extend(draw_triad(ax3d, t_cf_fut_rel0[h], R_c_fut_rel0[h],
                                       axis_len=pred_axis_len, lw=pred_lw))
 
-    # 3D bounds include wrist/cam/cam+0.1 and predicted camera+0.1
-    all_pts = np.vstack([
-        t_w_rel, t_c_rel, t_cf_rel,
-        t_cf_fut_rel0.reshape(-1, 3)
-    ])
+    # 3D bounds
+    all_pts = np.vstack([t_w_rel, t_c_rel, t_cf_rel, t_cf_fut_rel0.reshape(-1, 3)])
     mins = all_pts.min(axis=0)
     maxs = all_pts.max(axis=0)
     center = (mins + maxs) / 2
@@ -318,16 +313,21 @@ def main():
     ax3d.set_box_aspect([1, 1, 1])
     set_axes_equal(ax3d)
 
-    # --- Right: image + projected points ---
-    axim.set_title("2D: projected camera+0.1 future (Pred: green->red, GT: green->blue)")
+    # --- Right: image + projected points + line connections ---
+    axim.set_title("2D: projected camera+0.1 future (Pred: green->red, GT: black->white)")
     axim.axis("off")
 
-    # Display RECEIVED image; ORIGINAL = rotate180(received)
     img_received0 = np.transpose(imgs[0], (1, 2, 0))
     im_artist = axim.imshow(img_received0, vmin=0.0, vmax=1.0)
 
-    pred_sc = axim.scatter([], [], s=80, linewidths=0.0)     # Pred
-    gt_sc = axim.scatter([], [], s=80, linewidths=0.0)       # GT
+    pred_sc = axim.scatter([], [], s=80, linewidths=0.0)     # Pred points
+    gt_sc = axim.scatter([], [], s=80, linewidths=0.0)       # GT points
+
+    # LineCollections for connecting adjacent projected points (after filtering)
+    pred_lc = LineCollection([], linewidths=2.0)  # colors updated per segment
+    gt_lc = LineCollection([], linewidths=2.0)
+    axim.add_collection(pred_lc)
+    axim.add_collection(gt_lc)
 
     # Principal point cross in DISPLAY coords
     h_disp0, w_disp0 = img_received0.shape[:2]
@@ -418,11 +418,22 @@ def main():
             uv_disp_pred[:, 0] = (w_disp - 1) - uv0_pred[:, 0]
             uv_disp_pred[:, 1] = (h_disp - 1) - uv0_pred[:, 1]
             pred_sc.set_offsets(uv_disp_pred)
-            rgba = colors_pred_future_gradient(uv_disp_pred.shape[0])
-            pred_sc.set_facecolors(rgba)
-            pred_sc.set_edgecolors(rgba)
+
+            rgba_pred = colors_pred_future_gradient(uv_disp_pred.shape[0])
+            pred_sc.set_facecolors(rgba_pred)
+            pred_sc.set_edgecolors(rgba_pred)
+
+            seg_pred = segments_from_points(uv_disp_pred)
+            pred_lc.set_segments(seg_pred)
+            if seg_pred.shape[0] > 0:
+                # per-segment colors: use start-point color
+                pred_lc.set_colors(rgba_pred[:-1])
+            else:
+                pred_lc.set_colors([])
         else:
             pred_sc.set_offsets(np.empty((0, 2)))
+            pred_lc.set_segments(np.empty((0, 2, 2)))
+            pred_lc.set_colors([])
 
         # -------------------------
         # Project GT/observation camera+0.1 points (i..i+H-1) into current camera frame
@@ -442,19 +453,33 @@ def main():
                 uv_disp_gt[:, 0] = (w_disp - 1) - uv0_gt[:, 0]
                 uv_disp_gt[:, 1] = (h_disp - 1) - uv0_gt[:, 1]
                 gt_sc.set_offsets(uv_disp_gt)
+
                 rgba_gt = colors_gt_future_gradient(uv_disp_gt.shape[0])
                 gt_sc.set_facecolors(rgba_gt)
                 gt_sc.set_edgecolors(rgba_gt)
+
+                seg_gt = segments_from_points(uv_disp_gt)
+                gt_lc.set_segments(seg_gt)
+                if seg_gt.shape[0] > 0:
+                    gt_lc.set_colors(rgba_gt[:-1])
+                else:
+                    gt_lc.set_colors([])
             else:
                 gt_sc.set_offsets(np.empty((0, 2)))
+                gt_lc.set_segments(np.empty((0, 2, 2)))
+                gt_lc.set_colors([])
         else:
             gt_sc.set_offsets(np.empty((0, 2)))
+            gt_lc.set_segments(np.empty((0, 2, 2)))
+            gt_lc.set_colors([])
 
         fig.suptitle(f"frame {i+1}/{T}")
 
         return ([wrist_line, cam_center_line, cam_fwd_line,
                  cur_pt, future_line, future_start,
-                 im_artist, cam_cross, pred_sc, gt_sc]
+                 im_artist, cam_cross,
+                 pred_sc, gt_sc,
+                 pred_lc, gt_lc]
                 + cur_triad + pred_triads)
 
     interval_ms = 1000.0 / max(args.fps, 1e-6)
