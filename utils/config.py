@@ -48,8 +48,6 @@ class CameraConfig:
 @dataclass
 class HandConfig:
     urdf_path: str
-    actuations_to_joints_output_is_degrees: bool = True
-    horizon: int = 16
     step: int = 4
 
 
@@ -112,8 +110,6 @@ def load_config(path: str) -> AppConfig:
         h = viz["hand"]
         hand_cfg = HandConfig(
             urdf_path=_req(h, "urdf_path"),
-            actuations_to_joints_output_is_degrees=h.get("actuations_to_joints_output_is_degrees", True),
-            horizon=int(h.get("horizon", 16)),
             step=int(h.get("step", 4)),
         )
 

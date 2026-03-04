@@ -45,8 +45,6 @@ viz:
   show_hand_future_3d: false
   hand:
     urdf_path: urdf/right_hand_no_prismatics.urdf
-    actuations_to_joints_output_is_degrees: true
-    horizon: 16
     step: 4
 
   show_hand_current_2d: false   # project current hand skeleton onto image

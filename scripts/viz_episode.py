@@ -333,7 +333,7 @@ def main():
 
         # --- optional: future hand skeletons (3D) ---
         if cfg.viz.show_hand_future_3d and pred_hand_skel_lc is not None:
-            Hh = int(min(max(cfg.viz.hand.horizon, 0), H))
+            Hh = H
             if Hh <= 0:
                 pred_hand_skel_lc.set_segments(np.empty((0, 2, 3), dtype=np.float64))
                 pred_hand_skel_lc.set_colors([])
@@ -357,7 +357,7 @@ def main():
                         wrist_xyz=wrist_xyz_h,
                         wrist_rot6d=wrist_rot6d_h,
                         actuations7=act7_h,
-                        actuations_to_joints_output_is_degrees=cfg.viz.hand.actuations_to_joints_output_is_degrees,
+                        actuations_to_joints_output_is_degrees=True,
                     )
                     if segs_w_h is None or np.asarray(segs_w_h).size == 0:
                         continue
