@@ -1,0 +1,54 @@
+io:
+  val_npz: /home/nan/datasets/viz_data/good_model_val_data/good_model_val_data.npz
+  pred_npz: /home/nan/datasets/viz_data/good_model_val_data/good_model_val_data_model_outputs.npz
+  pred_key: action.arm
+  pred_hand_key: action.hand
+  save_path: ""     # if non-empty, save mp4
+
+runtime:
+  fps: 20.0
+
+camera:
+  intrinsics:
+    fx: 243.31371125
+    fy: 243.36591085
+    cx: 330.20097652
+    cy: 185.82838602
+  distortion_equidistant:
+    k1: 0.05295615
+    k2: -0.03939104
+    k3: 0.01021067
+    k4: -0.00235273
+  # camera extrinsics in wrist frame
+  T_w_c: [-0.03704, -0.05092, 0.02236]
+  euler_zxy_deg: [8.175, -11.079, 12.307]  # (-171.825+180, -11.079, 12.307)
+  forward_offset_m: 0.1
+
+viz:
+  fig:
+    size: [14, 6]
+    axis_len: 0.03
+
+  # --- minimal baseline ---
+  show_obs_traj_3d: true
+  show_gt_proj_2d: true     # black->white GT projection (from obs camera+0.1)
+
+  # --- optional features ---
+  show_pred_cam_fwd_traj_3d: true
+  pred_pose_step: 4
+
+  show_pred_proj_2d: true   # green->red pred projection
+  show_pred_line_2d: true
+  show_gt_line_2d: true
+
+  show_hand_current_3d: false
+  show_hand_future_3d: false
+  hand:
+    urdf_path: urdf/right_hand_no_prismatics.urdf
+    actuations_to_joints_output_is_degrees: true
+    horizon: 16
+    step: 4
+
+  show_hand_current_2d: false   # project current hand skeleton onto image
+  # future hand on image can be added later; keep off by default
+  show_hand_future_2d: false
