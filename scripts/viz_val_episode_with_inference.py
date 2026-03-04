@@ -137,13 +137,11 @@ def colors_gt_future_gradient(n_pts):
     """GT future: black -> white (near -> far). alpha=1."""
     if n_pts <= 0:
         return np.empty((0, 4), dtype=np.float64)
-
-    t = np.linspace(0.0, 1.0, n_pts)  # near -> far
-
+    t = np.linspace(0.0, 1.0, n_pts)
     rgba = np.zeros((n_pts, 4), dtype=np.float64)
-    rgba[:, 0] = t   # R
-    rgba[:, 1] = t   # G
-    rgba[:, 2] = t   # B
+    rgba[:, 0] = t
+    rgba[:, 1] = t
+    rgba[:, 2] = t
     rgba[:, 3] = 1.0
     return rgba
 
@@ -216,7 +214,7 @@ def main():
     T = obs_state.shape[0]
     gt_pose9 = obs_state[:, :9]
     t_w = gt_pose9[:, :3].astype(np.float64)                   # wrist position (world-ish)
-    R_w = rot6d_to_matrix(gt_pose9[:, 3:9]).astype(np.float64) # wrist rotation
+    R_w = rot6d_to_matrix(gt_pose9[:, 3:9]).astype(np.float64) # wrist rotation (world-ish)
 
     # --- Camera extrinsics in wrist ---
     R_w_c = euler_zxy_custom_deg_to_rot(EULER_ZXY_DEG[0], EULER_ZXY_DEG[1], EULER_ZXY_DEG[2])
@@ -225,16 +223,6 @@ def main():
     t_c  = t_w + (R_w @ T_W_C.reshape(3, 1)).reshape(T, 3)
     R_c  = np.einsum("tij,jk->tik", R_w, R_w_c)
     t_cf = t_c + (R_c @ P_C_FORWARD.reshape(3, 1)).reshape(T, 3)
-
-    # --- Relative to wrist frame-0 ---
-    t0 = t_w[0]
-    R0T = R_w[0].T
-
-    t_w_rel  = (R0T @ (t_w  - t0).T).T
-    t_c_rel  = (R0T @ (t_c  - t0).T).T
-    t_cf_rel = (R0T @ (t_cf - t0).T).T
-    R_c_rel  = np.einsum("ij,tjk->tik", R0T, R_c)
-    R_w_rel  = np.einsum("ij,tjk->tik", R0T, R_w)
 
     # --- Load predictions ---
     pred = np.load(args.pred_npz, allow_pickle=True)
@@ -249,14 +237,8 @@ def main():
     if Tp != T:
         raise ValueError(f"T mismatch: val T={T}, pred T={Tp}")
 
-    pred_tw = pred_arm[:, :, :3].astype(np.float64)
-    pred_Rw = rot6d_to_matrix(pred_arm[:, :, 3:9]).astype(np.float64)
-
-    # Pred wrist positions/rotations into rel frame-0 (for consistency)
-    pred_tw_rel = np.empty_like(pred_tw)
-    for tt in range(T):
-        pred_tw_rel[tt] = (R0T @ (pred_tw[tt] - t0).T).T  # (H,3)
-    pred_Rw_rel = np.einsum("ij,thjk->thik", R0T, pred_Rw)
+    pred_tw = pred_arm[:, :, :3].astype(np.float64)                 # (T,H,3) world-ish
+    pred_Rw = rot6d_to_matrix(pred_arm[:, :, 3:9]).astype(np.float64)  # (T,H,3,3) world-ish
 
     # -------------------------
     # Figure setup
@@ -265,41 +247,46 @@ def main():
     ax3d = fig.add_subplot(1, 2, 1, projection="3d")
     axim = fig.add_subplot(1, 2, 2)
 
-    # --- Left: trajectories (relative to wrist frame-0) ---
-    ax3d.set_title("Wrist / Camera Center / Camera+0.1m (relative to wrist frame-0)")
+    # --- Left: trajectories (WORLD frame) ---
+    ax3d.set_title("Wrist / Camera Center / Camera+0.1m (world frame)")
     ax3d.set_xlabel("x")
     ax3d.set_ylabel("y")
     ax3d.set_zlabel("z")
 
-    wrist_line, = ax3d.plot(t_w_rel[:, 0], t_w_rel[:, 1], t_w_rel[:, 2], lw=2, color="lightgray", label="wrist (obs)")
-    cam_center_line, = ax3d.plot(t_c_rel[:, 0], t_c_rel[:, 1], t_c_rel[:, 2], lw=2, color="black", label="camera center (obs)")
-    cam_fwd_line, = ax3d.plot(t_cf_rel[:, 0], t_cf_rel[:, 1], t_cf_rel[:, 2], lw=2, color="purple", label="camera +0.1m (obs)")
+    # Draw world XYZ triad at origin
+    world_triad = draw_triad(ax3d, np.array([0.0, 0.0, 0.0], dtype=np.float64),
+                             np.eye(3, dtype=np.float64),
+                             axis_len=args.axis_len * 1.5, lw=2.5)
+
+    wrist_line, = ax3d.plot(t_w[:, 0], t_w[:, 1], t_w[:, 2], lw=2, color="lightgray", label="wrist (obs)")
+    cam_center_line, = ax3d.plot(t_c[:, 0], t_c[:, 1], t_c[:, 2], lw=2, color="black", label="camera center (obs)")
+    cam_fwd_line, = ax3d.plot(t_cf[:, 0], t_cf[:, 1], t_cf[:, 2], lw=2, color="purple", label="camera +0.1m (obs)")
     ax3d.legend(loc="upper left")
 
-    ax3d.scatter([t_w_rel[0, 0]], [t_w_rel[0, 1]], [t_w_rel[0, 2]], s=40)
-    _triad0 = draw_triad(ax3d, t_w_rel[0], R_w_rel[0], axis_len=args.axis_len, lw=2.0)
+    ax3d.scatter([t_w[0, 0]], [t_w[0, 1]], [t_w[0, 2]], s=40)
+    _triad0 = draw_triad(ax3d, t_w[0], R_w[0], axis_len=args.axis_len, lw=2.0)
 
-    cur_pt = ax3d.scatter([t_w_rel[0, 0]], [t_w_rel[0, 1]], [t_w_rel[0, 2]], s=60)
-    cur_triad = list(draw_triad(ax3d, t_w_rel[0], R_w_rel[0], axis_len=args.axis_len, lw=2.0))
+    cur_pt = ax3d.scatter([t_w[0, 0]], [t_w[0, 1]], [t_w[0, 2]], s=60)
+    cur_triad = list(draw_triad(ax3d, t_w[0], R_w[0], axis_len=args.axis_len, lw=2.0))
 
-    # Initial predicted camera+0.1 future trajectory (rel frame-0)
-    t_c_fut_rel0 = pred_tw_rel[0] + (pred_Rw_rel[0] @ T_W_C.reshape(3, 1)).reshape(H, 3)
-    R_c_fut_rel0 = np.einsum("hij,jk->hik", pred_Rw_rel[0], R_w_c)
-    t_cf_fut_rel0 = t_c_fut_rel0 + (R_c_fut_rel0 @ P_C_FORWARD.reshape(3, 1)).reshape(H, 3)
+    # Initial predicted camera+0.1 future trajectory (world frame)
+    t_c_fut0 = pred_tw[0] + (pred_Rw[0] @ T_W_C.reshape(3, 1)).reshape(H, 3)
+    R_c_fut0 = np.einsum("hij,jk->hik", pred_Rw[0], R_w_c)
+    t_cf_fut0 = t_c_fut0 + (R_c_fut0 @ P_C_FORWARD.reshape(3, 1)).reshape(H, 3)
 
-    future_line, = ax3d.plot(t_cf_fut_rel0[:, 0], t_cf_fut_rel0[:, 1], t_cf_fut_rel0[:, 2], linewidth=2.0)
-    future_start = ax3d.scatter([t_cf_fut_rel0[0, 0]], [t_cf_fut_rel0[0, 1]], [t_cf_fut_rel0[0, 2]], s=25)
+    future_line, = ax3d.plot(t_cf_fut0[:, 0], t_cf_fut0[:, 1], t_cf_fut0[:, 2], linewidth=2.0)
+    future_start = ax3d.scatter([t_cf_fut0[0, 0]], [t_cf_fut0[0, 1]], [t_cf_fut0[0, 2]], s=25)
 
     pred_triads = []
     step = max(1, int(args.pred_pose_step))
     pred_axis_len = args.axis_len * 0.7
     pred_lw = 1.5
     for h in range(0, H, step):
-        pred_triads.extend(draw_triad(ax3d, t_cf_fut_rel0[h], R_c_fut_rel0[h],
+        pred_triads.extend(draw_triad(ax3d, t_cf_fut0[h], R_c_fut0[h],
                                       axis_len=pred_axis_len, lw=pred_lw))
 
     # 3D bounds
-    all_pts = np.vstack([t_w_rel, t_c_rel, t_cf_rel, t_cf_fut_rel0.reshape(-1, 3)])
+    all_pts = np.vstack([t_w, t_c, t_cf, t_cf_fut0.reshape(-1, 3), np.zeros((1, 3), dtype=np.float64)])
     mins = all_pts.min(axis=0)
     maxs = all_pts.max(axis=0)
     center = (mins + maxs) / 2
@@ -323,8 +310,7 @@ def main():
     pred_sc = axim.scatter([], [], s=80, linewidths=0.0)     # Pred points
     gt_sc = axim.scatter([], [], s=80, linewidths=0.0)       # GT points
 
-    # LineCollections for connecting adjacent projected points (after filtering)
-    pred_lc = LineCollection([], linewidths=2.0)  # colors updated per segment
+    pred_lc = LineCollection([], linewidths=2.0)
     gt_lc = LineCollection([], linewidths=2.0)
     axim.add_collection(pred_lc)
     axim.add_collection(gt_lc)
@@ -335,7 +321,6 @@ def main():
     cy_disp0 = (h_disp0 - 1) - CY
     cam_cross = axim.scatter([cx_disp0], [cy_disp0], s=200, marker="x", linewidths=2)
 
-    # Pause/play on space
     current_frame = {"i": 0}
     paused = {"value": False}
 
@@ -355,32 +340,32 @@ def main():
         current_frame["i"] = i
 
         # -------------------------
-        # Update 3D current wrist pose triad
+        # Update 3D current wrist pose triad (world frame)
         # -------------------------
-        p = t_w_rel[i]
+        p = t_w[i]
         cur_pt._offsets3d = ([p[0]], [p[1]], [p[2]])
 
         for line in cur_triad:
             line.remove()
         cur_triad.clear()
-        cur_triad.extend(draw_triad(ax3d, p, R_w_rel[i], axis_len=args.axis_len, lw=2.0))
+        cur_triad.extend(draw_triad(ax3d, p, R_w[i], axis_len=args.axis_len, lw=2.0))
 
         # -------------------------
-        # Predicted future camera+0.1 trajectory in rel frame-0
+        # Predicted future camera+0.1 trajectory (world frame)
         # -------------------------
-        t_c_fut_rel = pred_tw_rel[i] + (pred_Rw_rel[i] @ T_W_C.reshape(3, 1)).reshape(H, 3)          # (H,3)
-        R_c_fut_rel = np.einsum("hij,jk->hik", pred_Rw_rel[i], R_w_c)                                # (H,3,3)
-        t_cf_fut_rel = t_c_fut_rel + (R_c_fut_rel @ P_C_FORWARD.reshape(3, 1)).reshape(H, 3)         # (H,3)
+        t_c_fut = pred_tw[i] + (pred_Rw[i] @ T_W_C.reshape(3, 1)).reshape(H, 3)          # (H,3)
+        R_c_fut = np.einsum("hij,jk->hik", pred_Rw[i], R_w_c)                            # (H,3,3)
+        t_cf_fut = t_c_fut + (R_c_fut @ P_C_FORWARD.reshape(3, 1)).reshape(H, 3)         # (H,3)
 
-        future_line.set_data(t_cf_fut_rel[:, 0], t_cf_fut_rel[:, 1])
-        future_line.set_3d_properties(t_cf_fut_rel[:, 2])
-        future_start._offsets3d = ([t_cf_fut_rel[0, 0]], [t_cf_fut_rel[0, 1]], [t_cf_fut_rel[0, 2]])
+        future_line.set_data(t_cf_fut[:, 0], t_cf_fut[:, 1])
+        future_line.set_3d_properties(t_cf_fut[:, 2])
+        future_start._offsets3d = ([t_cf_fut[0, 0]], [t_cf_fut[0, 1]], [t_cf_fut[0, 2]])
 
         for line in pred_triads:
             line.remove()
         pred_triads.clear()
         for h in range(0, H, step):
-            pred_triads.extend(draw_triad(ax3d, t_cf_fut_rel[h], R_c_fut_rel[h],
+            pred_triads.extend(draw_triad(ax3d, t_cf_fut[h], R_c_fut[h],
                                           axis_len=pred_axis_len, lw=pred_lw))
 
         # -------------------------
@@ -390,24 +375,22 @@ def main():
         im_artist.set_data(img_received)
         h_disp, w_disp = img_received.shape[:2]
 
-        # principal point cross in DISPLAY coords
         cx_disp = (w_disp - 1) - CX
         cy_disp = (h_disp - 1) - CY
         cam_cross.set_offsets(np.array([[cx_disp, cy_disp]], dtype=np.float64))
 
-        # ORIGINAL image size for in-bounds
         img_orig = rotate_image_180(img_received)
         h0, w0 = img_orig.shape[:2]
 
-        # Current camera pose (rel) for projection frame
-        tc_i = t_c_rel[i]
-        Rc_i = R_c_rel[i]
+        # Current camera pose (world frame) for projection frame
+        tc_i = t_c[i]
+        Rc_i = R_c[i]
 
         # -------------------------
         # Project Pred camera+0.1 points into current camera frame
         # -------------------------
-        dt_pred = t_cf_fut_rel - tc_i.reshape(1, 3)      # (H,3)
-        P_cam_pred = (Rc_i.T @ dt_pred.T).T              # (H,3)
+        dt_pred = t_cf_fut - tc_i.reshape(1, 3)      # (H,3) in world
+        P_cam_pred = (Rc_i.T @ dt_pred.T).T          # (H,3) in current camera frame
         uv_pred = project_points_equidistant_full(P_cam_pred, FX, FY, CX, CY, K1, K2, K3, K4)
 
         inb0_pred = (uv_pred[:, 0] >= 0) & (uv_pred[:, 0] < w0) & (uv_pred[:, 1] >= 0) & (uv_pred[:, 1] < h0)
@@ -425,11 +408,7 @@ def main():
 
             seg_pred = segments_from_points(uv_disp_pred)
             pred_lc.set_segments(seg_pred)
-            if seg_pred.shape[0] > 0:
-                # per-segment colors: use start-point color
-                pred_lc.set_colors(rgba_pred[:-1])
-            else:
-                pred_lc.set_colors([])
+            pred_lc.set_colors(rgba_pred[:-1] if seg_pred.shape[0] > 0 else [])
         else:
             pred_sc.set_offsets(np.empty((0, 2)))
             pred_lc.set_segments(np.empty((0, 2, 2)))
@@ -441,7 +420,7 @@ def main():
         j1 = min(T, i + H)  # exclusive
         if i < j1:
             idx = np.arange(i, j1, dtype=np.int64)  # near -> far
-            dt_gt = t_cf_rel[idx] - tc_i.reshape(1, 3)
+            dt_gt = t_cf[idx] - tc_i.reshape(1, 3)  # world
             P_cam_gt = (Rc_i.T @ dt_gt.T).T
             uv_gt = project_points_equidistant_full(P_cam_gt, FX, FY, CX, CY, K1, K2, K3, K4)
 
@@ -460,10 +439,7 @@ def main():
 
                 seg_gt = segments_from_points(uv_disp_gt)
                 gt_lc.set_segments(seg_gt)
-                if seg_gt.shape[0] > 0:
-                    gt_lc.set_colors(rgba_gt[:-1])
-                else:
-                    gt_lc.set_colors([])
+                gt_lc.set_colors(rgba_gt[:-1] if seg_gt.shape[0] > 0 else [])
             else:
                 gt_sc.set_offsets(np.empty((0, 2)))
                 gt_lc.set_segments(np.empty((0, 2, 2)))
@@ -480,7 +456,7 @@ def main():
                  im_artist, cam_cross,
                  pred_sc, gt_sc,
                  pred_lc, gt_lc]
-                + cur_triad + pred_triads)
+                + list(world_triad) + cur_triad + pred_triads)
 
     interval_ms = 1000.0 / max(args.fps, 1e-6)
     ani = FuncAnimation(fig, update, frames=T, interval=interval_ms, blit=False)
